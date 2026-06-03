@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "title": "Dresden Departures Board",
+  "description": "Dresden VVO departure monitor with platform-style display",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Enable or disable this plugin"
+    },
+    "display_duration": {
+      "type": "number",
+      "default": 86400,
+      "minimum": 60,
+      "maximum": 86400,
+      "description": "Seconds to show this screen before rotating (use 86400 to stay on this view all day)"
+    },
+    "update_interval": {
+      "type": "integer",
+      "default": 15,
+      "minimum": 5,
+      "maximum": 120,
+      "description": "Seconds between departure API refreshes (clock redraws every minute)"
+    },
+    "stop_id": {
+      "type": "string",
+      "x-secret": true,
+      "description": "Stop name or VVO stop ID (stored in config_secrets.json, not config.json). Names are resolved via the VVO pointfinder API."
+    },
+    "stop_name": {
+      "type": "string",
+      "default": "",
+      "x-secret": true,
+      "description": "Short display alias for the header (stored in config_secrets.json). Shown instead of the API name; not truncated when set."
+    },
+    "tram_only": {
+      "type": "boolean",
+      "default": true,
+      "description": "Show only trams (Mot=Tram), hide buses"
+    },
+    "max_departures": {
+      "type": "integer",
+      "default": 6,
+      "minimum": 1,
+      "maximum": 8,
+      "description": "Max departure rows (6–7 fit on a 64px-tall display; limited by screen height)"
+    },
+    "timezone": {
+      "type": "string",
+      "default": "Europe/Berlin",
+      "description": "Timezone for clock and departure times"
+    },
+    "weather_at_stop": {
+      "type": "boolean",
+      "default": true,
+      "description": "Use Open-Meteo weather at the stop coordinates from VVO (recommended). When false, uses latitude/longitude below."
+    },
+    "latitude": {
+      "type": "number",
+      "default": 51.0504,
+      "description": "Fallback latitude for Open-Meteo when weather_at_stop is false or stop coords unavailable"
+    },
+    "longitude": {
+      "type": "number",
+      "default": 13.7373,
+      "description": "Fallback longitude for Open-Meteo when weather_at_stop is false or stop coords unavailable"
+    },
+    "sidebar_percent": {
+      "type": "number",
+      "default": 40,
+      "minimum": 15,
+      "maximum": 50,
+      "description": "Width of the right panel (date/time/weather) as percent of display width"
+    }
+  },
+  "required": ["stop_id"],
+  "additionalProperties": false
+}

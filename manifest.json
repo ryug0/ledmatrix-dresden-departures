@@ -1,0 +1,24 @@
+{
+  "id": "ledmatrix-dresden-departures",
+  "name": "Dresden Departures Board",
+  "version": "1.0.0",
+  "author": "ryug0",
+  "description": "Dresden VVO departure board with tram times, date, clock, and weather",
+  "entry_point": "manager.py",
+  "class_name": "DresdenDeparturesPlugin",
+  "category": "transit",
+  "tags": ["dresden", "tram", "vvo", "transit", "departures", "dvb"],
+  "display_modes": ["dresden_departures"],
+  "update_interval": 15,
+  "default_duration": 86400,
+  "config_schema": "config_schema.json",
+  "compatible_versions": [">=2.0.0"],
+  "versions": [
+    {
+      "released": "2026-06-02",
+      "version": "1.0.0",
+      "ledmatrix_min": "2.0.0"
+    }
+  ],
+  "last_updated": "2026-06-02"
+}
