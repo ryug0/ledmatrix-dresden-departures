@@ -44,7 +44,12 @@
       "default": 6,
       "minimum": 1,
       "maximum": 8,
-      "description": "Max departure rows (6–7 fit on a 64px-tall display; limited by screen height)"
+      "description": "Max departure rows (up to 8 without station header on 64px height; ~6 with header)"
+    },
+    "show_station_header": {
+      "type": "boolean",
+      "default": true,
+      "description": "Show stop name at top of left panel. Disable to fit more departure rows."
     },
     "timezone": {
       "type": "string",

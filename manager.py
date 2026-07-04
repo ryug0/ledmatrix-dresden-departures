@@ -54,11 +54,18 @@ COLOR_WHITE = (255, 255, 255)
 # --- Display layout (left panel) ---
 
 ROW_HEIGHT = 8
+STATION_X = 2
+STATION_DIVIDER_GAP = 0   # keep station text off the sidebar divider
+STATION_SPACE_TRACKING = -3  # tighten gaps between words (6x13 space is 6px wide)
 STATION_Y = 0
-FIRST_ROW_Y = 14
-DEST_NAME_X = 13          # destination text start
+FIRST_ROW_Y_WITH_HEADER = 15
+FIRST_ROW_Y_NO_HEADER = 0
+DEST_NAME_X = 15          # destination text start
 MINS_RIGHT_PAD = 1        # gap before countdown
 MINS_COLUMN_CHARS = 2     # fixed width reserve (99 min) so truncation dot stays aligned
+
+# Fallback when schema merge did not run; keep in sync with config_schema.json "sidebar_percent.default"
+_SIDEBAR_PERCENT_DEFAULT = 40
 
 # --- Sidebar layout (edit y-values here to tune the right panel) ---
 
@@ -155,12 +162,14 @@ class BdfFont:
             self._face.load_char("H")
             self._ascender = max(int(self._face.glyph.bitmap_top), line_height - 1)
 
-    def text_width(self, text: str, tracking: int = 0) -> int:
+    def text_width(self, text: str, tracking: int = 0, space_tracking: int = 0) -> int:
         width = 0
         for i, char in enumerate(text):
             self._face.load_char(char)
             width += self._face.glyph.advance.x >> 6
-            if tracking and i < len(text) - 1:
+            if char == " " and space_tracking:
+                width += space_tracking
+            elif tracking and i < len(text) - 1:
                 width += tracking
         return width
 
@@ -172,6 +181,7 @@ class BdfFont:
         y: int,
         color: Tuple[int, int, int],
         tracking: int = 0,
+        space_tracking: int = 0,
     ) -> None:
         baseline_y = y + self._ascender
         for i, char in enumerate(text):
@@ -187,7 +197,9 @@ class BdfFont:
                         if byte & (1 << (7 - (col % 8))):
                             draw.point((x + glyph_left + col, baseline_y - glyph_top + row), fill=color)
             x += self._face.glyph.advance.x >> 6
-            if tracking and i < len(text) - 1:
+            if char == " " and space_tracking:
+                x += space_tracking
+            elif tracking and i < len(text) - 1:
                 x += tracking
 
 
@@ -209,13 +221,14 @@ class DresdenDeparturesPlugin(BasePlugin):
         self.stop_name_override = str(config.get("stop_name", "")).strip()
         self.tram_only = bool(config.get("tram_only", True))
         self.max_departures = int(config.get("max_departures", 6))
+        self.show_station_header = bool(config.get("show_station_header", True))
         self.timezone = ZoneInfo(config.get("timezone", "Europe/Berlin"))
         self.weather_at_stop = bool(config.get("weather_at_stop", True))
         self._config_latitude = float(config.get("latitude", 51.0504))
         self._config_longitude = float(config.get("longitude", 13.7373))
         self._stop_latitude: Optional[float] = None
         self._stop_longitude: Optional[float] = None
-        self.sidebar_percent = float(config.get("sidebar_percent", 40))
+        self.sidebar_percent = float(config.get("sidebar_percent", _SIDEBAR_PERCENT_DEFAULT))
         self._config_sig = self._config_signature(config)
 
         self._station_name = self.stop_name_override or "Haltestelle"
@@ -226,6 +239,7 @@ class DresdenDeparturesPlugin(BasePlugin):
 
         fonts_dir = _ledmatrix_fonts_dir(plugin_manager)
         self._font_body = self._load_bdf(fonts_dir / "5x7.bdf", 8)
+        self._font_station = self._load_bdf(fonts_dir / "6x13.bdf", 13)
         self._font_header = self._load_bdf(fonts_dir / "6x13B.bdf", 13)
 
     @staticmethod
@@ -236,8 +250,9 @@ class DresdenDeparturesPlugin(BasePlugin):
             str(config.get("weather_at_stop", True)),
             str(config.get("latitude", "")),
             str(config.get("longitude", "")),
-            str(config.get("sidebar_percent", 40)),
+            str(config.get("sidebar_percent", _SIDEBAR_PERCENT_DEFAULT)),
             str(config.get("max_departures", 6)),
+            str(config.get("show_station_header", True)),
         ])
 
     def _sync_config(self) -> None:
@@ -245,10 +260,11 @@ class DresdenDeparturesPlugin(BasePlugin):
         self.stop_name_override = str(self.config.get("stop_name", "")).strip()
         self.tram_only = bool(self.config.get("tram_only", True))
         self.max_departures = int(self.config.get("max_departures", 6))
+        self.show_station_header = bool(self.config.get("show_station_header", True))
         self.weather_at_stop = bool(self.config.get("weather_at_stop", True))
         self._config_latitude = float(self.config.get("latitude", 51.0504))
         self._config_longitude = float(self.config.get("longitude", 13.7373))
-        self.sidebar_percent = float(self.config.get("sidebar_percent", 40))
+        self.sidebar_percent = float(self.config.get("sidebar_percent", _SIDEBAR_PERCENT_DEFAULT))
         sig = self._config_signature(self.config)
         if sig != self._config_sig:
             self._config_sig = sig
@@ -322,8 +338,11 @@ class DresdenDeparturesPlugin(BasePlugin):
         divider_x = left_w
         return left_w, divider_x, right_w
 
+    def _first_row_y(self) -> int:
+        return FIRST_ROW_Y_WITH_HEADER if self.show_station_header else FIRST_ROW_Y_NO_HEADER
+
     def _visible_departure_count(self, height: int) -> int:
-        rows_fit = max(1, (height - FIRST_ROW_Y) // ROW_HEIGHT)
+        rows_fit = max(1, (height - self._first_row_y()) // ROW_HEIGHT)
         return min(self.max_departures, rows_fit)
 
     def display(self, force_clear: bool = False) -> None:
@@ -331,7 +350,10 @@ class DresdenDeparturesPlugin(BasePlugin):
         now = datetime.now(self.timezone)
         forecast_slots = self._hourly_forecast_slots(self._weather.get("hourly") or {}, now)
         weather_sig = f"{self._weather.get('temp')}|{forecast_slots}"
-        render_key = f"{now:%Y%m%d%H%M}|{self._departure_sig()}|{weather_sig}|{self._station_name}|{self.stop_query}"
+        render_key = (
+            f"{now:%Y%m%d%H%M}|{self._departure_sig()}|{weather_sig}|"
+            f"{self._station_name}|{self.stop_query}|{self.show_station_header}"
+        )
         if not force_clear and render_key == self._last_render_key and self._cached_image is not None:
             self.display_manager.image = self._cached_image
             self.display_manager.update_display()
@@ -360,15 +382,24 @@ class DresdenDeparturesPlugin(BasePlugin):
             return self.stop_name_override
         return self._station_name
 
-    def _draw_left_panel(self, draw: ImageDraw.ImageDraw, left_w: int, height: int, visible_rows: int) -> None:
-        header = self._display_station_name()
-        if self.stop_name_override:
-            header_text = header
-        else:
-            header_text = self._truncate(header, left_w - 4, self._font_header)
-        self._font_header.draw(draw, header_text, 2, STATION_Y, COLOR_WHITE)
+    def _station_max_width(self, left_w: int) -> int:
+        return max(8, left_w - STATION_X - STATION_DIVIDER_GAP)
 
-        row_y = FIRST_ROW_Y
+    def _draw_left_panel(self, draw: ImageDraw.ImageDraw, left_w: int, height: int, visible_rows: int) -> None:
+        row_y = self._first_row_y()
+        if self.show_station_header:
+            header = self._display_station_name()
+            header_text = self._truncate(
+                header,
+                self._station_max_width(left_w),
+                self._font_station,
+                space_tracking=STATION_SPACE_TRACKING,
+            )
+            self._font_station.draw(
+                draw, header_text, STATION_X, STATION_Y, COLOR_WHITE,
+                space_tracking=STATION_SPACE_TRACKING,
+            )
+
         shown = 0
         for dep in self._departures:
             if shown >= visible_rows or row_y + ROW_HEIGHT > height:
@@ -396,7 +427,7 @@ class DresdenDeparturesPlugin(BasePlugin):
 
         if not self._departures:
             msg = "stop_id fehlt" if not self.stop_query else "Keine Daten"
-            self._font_body.draw(draw, msg, 2, FIRST_ROW_Y, COLOR_ORANGE)
+            self._font_body.draw(draw, msg, 2, self._first_row_y(), COLOR_ORANGE)
 
     def _draw_right_panel(
         self,
@@ -849,11 +880,11 @@ class DresdenDeparturesPlugin(BasePlugin):
         text = re.sub(r"->Li\.(\d+)\s*$", r"->\1", text, flags=re.IGNORECASE)
         return text
 
-    def _truncate(self, text: str, max_px: int, font: BdfFont) -> str:
-        if font.text_width(text) <= max_px:
+    def _truncate(self, text: str, max_px: int, font: BdfFont, **font_kw: Any) -> str:
+        if font.text_width(text, **font_kw) <= max_px:
             return text
         trimmed = text.rstrip()
-        while trimmed and font.text_width(trimmed + ".") > max_px:
+        while trimmed and font.text_width(trimmed + ".", **font_kw) > max_px:
             trimmed = trimmed[:-1].rstrip()
         return (trimmed + ".") if trimmed else text[:1]
 
