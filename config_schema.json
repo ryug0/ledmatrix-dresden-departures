@@ -21,7 +21,7 @@
       "default": 15,
       "minimum": 5,
       "maximum": 120,
-      "description": "Seconds between departure API refreshes (clock redraws every minute)"
+      "description": "Seconds between VVO API refreshes (display and countdown update every second)"
     },
     "stop_id": {
       "type": "string",
@@ -34,10 +34,27 @@
       "x-secret": true,
       "description": "Short display alias for the header (stored in config_secrets.json). Shown instead of the API name; not truncated when set."
     },
+    "destination_aliases": {
+      "type": "object",
+      "default": {},
+      "x-secret": true,
+      "description": "Map stop names to short nicknames in config_secrets.json. Each key is a Haltestelle name (e.g. Wasaplatz, Görlitzer Straße); the plugin checks whether that stop lies ahead on the trip route (via VVO trip details), so nicknames stay correct even when the Endhaltestelle changes. Falls back to matching the Direction label if trip lookup fails.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "tram_only": {
       "type": "boolean",
       "default": true,
       "description": "Show only trams (Mot=Tram), hide buses"
+    },
+    "hidden_lines": {
+      "type": "array",
+      "default": [],
+      "description": "Tram line numbers to hide from the departure list (e.g. [\"4\", \"9\"])",
+      "items": {
+        "type": "string"
+      }
     },
     "max_departures": {
       "type": "integer",

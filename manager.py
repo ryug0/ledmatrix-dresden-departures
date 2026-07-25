@@ -63,6 +63,7 @@ FIRST_ROW_Y_NO_HEADER = 0
 DEST_NAME_X = 15          # destination text start
 MINS_RIGHT_PAD = 1        # gap before countdown
 MINS_COLUMN_CHARS = 2     # fixed width reserve (99 min) so truncation dot stays aligned
+DIRECTION_ARROW = ">"     # single-char separator on the LED panel (VVO uses "->")
 
 # Fallback when schema merge did not run; keep in sync with config_schema.json "sidebar_percent.default"
 _SIDEBAR_PERCENT_DEFAULT = 40
@@ -72,14 +73,17 @@ _SIDEBAR_PERCENT_DEFAULT = 40
 SIDEBAR_LAYOUT = {
     "date_y": 1,
     "date_gap": 3,           # pixels between weekday ("Mi") and "3."
+    "date_month_gap": 2,     # pixels between day dot ("25.") and month ("Jul")
     "time_y": 9,
-    "time_tracking": 0,      # HH:MM:SS must fit ~54px sidebar inner width
+    "time_tracking": 0,
+    "time_digit_tracking": 1,  # 1px gap between adjacent digits (e.g. 08)
+    "time_colon_tracking": 0,  # extra px after each clock colon
     "weather_icon_y": 23,
     "weather_temp_y": 25,
     "weather_icon_size": 12,
     "forecast_labels_y": 36,   # hour labels
     "forecast_icons_y": 45,    # icon above temp in each column
-    "forecast_temps_y": 54,    # temp below icon
+    "forecast_temps_y": 56,    # +2px gap below forecast icons (sun rays)
     "forecast_icon_size": 8,
     "forecast_col_gutter": 0,  # px gap between time columns
     "forecast_temp_offset_x": 2,  # nudge temps right to align under hour labels
@@ -163,16 +167,71 @@ class BdfFont:
             self._face.load_char("H")
             self._ascender = max(int(self._face.glyph.bitmap_top), line_height - 1)
 
-    def text_width(self, text: str, tracking: int = 0, space_tracking: int = 0) -> int:
+    def text_width(
+        self,
+        text: str,
+        tracking: int = 0,
+        space_tracking: int = 0,
+        digit_tracking: int = 0,
+        small_colon: bool = False,
+        colon_tracking: int = 0,
+    ) -> int:
         width = 0
         for i, char in enumerate(text):
-            self._face.load_char(char)
-            width += self._face.glyph.advance.x >> 6
+            if char == ".":
+                width += self._PERIOD_ADVANCE
+            elif char == ":" and small_colon:
+                width += self._COLON_ADVANCE
+                if colon_tracking and i < len(text) - 1:
+                    width += colon_tracking
+            else:
+                self._face.load_char(char)
+                width += self._face.glyph.advance.x >> 6
             if char == " " and space_tracking:
                 width += space_tracking
-            elif tracking and i < len(text) - 1:
-                width += tracking
+            elif i < len(text) - 1:
+                next_char = text[i + 1]
+                if digit_tracking and char.isdigit() and next_char.isdigit():
+                    width += digit_tracking
+                elif tracking:
+                    width += tracking
         return width
+
+    _PERIOD_ADVANCE = 2  # BDF "." is a 2×2 block; we render one pixel in a narrow cell
+    _COLON_ADVANCE = 4   # clock colon: two 2×2 dots, tight cell
+
+    def _fill_2x2(
+        self,
+        draw: ImageDraw.ImageDraw,
+        cx: int,
+        cy: int,
+        color: Tuple[int, int, int],
+    ) -> None:
+        for dy in (0, 1):
+            for dx in (0, 1):
+                draw.point((cx + dx, cy + dy), fill=color)
+
+    def _draw_period_dot(
+        self,
+        draw: ImageDraw.ImageDraw,
+        x: int,
+        baseline_y: int,
+        color: Tuple[int, int, int],
+    ) -> int:
+        draw.point((x + self._PERIOD_ADVANCE // 2, baseline_y - 1), fill=color)
+        return self._PERIOD_ADVANCE
+
+    def _draw_small_colon(
+        self,
+        draw: ImageDraw.ImageDraw,
+        x: int,
+        baseline_y: int,
+        color: Tuple[int, int, int],
+    ) -> int:
+        cx = x + (self._COLON_ADVANCE - 2) // 2
+        self._fill_2x2(draw, cx, baseline_y - 6, color)
+        self._fill_2x2(draw, cx, baseline_y - 3, color)
+        return self._COLON_ADVANCE
 
     def draw(
         self,
@@ -183,25 +242,39 @@ class BdfFont:
         color: Tuple[int, int, int],
         tracking: int = 0,
         space_tracking: int = 0,
+        digit_tracking: int = 0,
+        small_colon: bool = False,
+        colon_tracking: int = 0,
     ) -> None:
         baseline_y = y + self._ascender
         for i, char in enumerate(text):
-            self._face.load_char(char)
-            bitmap = self._face.glyph.bitmap
-            glyph_left = self._face.glyph.bitmap_left
-            glyph_top = self._face.glyph.bitmap_top
-            for row in range(bitmap.rows):
-                for col in range(bitmap.width):
-                    byte_index = row * bitmap.pitch + (col // 8)
-                    if byte_index < len(bitmap.buffer):
-                        byte = bitmap.buffer[byte_index]
-                        if byte & (1 << (7 - (col % 8))):
-                            draw.point((x + glyph_left + col, baseline_y - glyph_top + row), fill=color)
-            x += self._face.glyph.advance.x >> 6
+            if char == ".":
+                x += self._draw_period_dot(draw, x, baseline_y, color)
+            elif char == ":" and small_colon:
+                x += self._draw_small_colon(draw, x, baseline_y, color)
+                if colon_tracking and i < len(text) - 1:
+                    x += colon_tracking
+            else:
+                self._face.load_char(char)
+                bitmap = self._face.glyph.bitmap
+                glyph_left = self._face.glyph.bitmap_left
+                glyph_top = self._face.glyph.bitmap_top
+                for row in range(bitmap.rows):
+                    for col in range(bitmap.width):
+                        byte_index = row * bitmap.pitch + (col // 8)
+                        if byte_index < len(bitmap.buffer):
+                            byte = bitmap.buffer[byte_index]
+                            if byte & (1 << (7 - (col % 8))):
+                                draw.point((x + glyph_left + col, baseline_y - glyph_top + row), fill=color)
+                x += self._face.glyph.advance.x >> 6
             if char == " " and space_tracking:
                 x += space_tracking
-            elif tracking and i < len(text) - 1:
-                x += tracking
+            elif i < len(text) - 1:
+                next_char = text[i + 1]
+                if digit_tracking and char.isdigit() and next_char.isdigit():
+                    x += digit_tracking
+                elif tracking:
+                    x += tracking
 
 
 class DresdenDeparturesPlugin(BasePlugin):
@@ -230,6 +303,8 @@ class DresdenDeparturesPlugin(BasePlugin):
         self._stop_latitude: Optional[float] = None
         self._stop_longitude: Optional[float] = None
         self.sidebar_percent = float(config.get("sidebar_percent", _SIDEBAR_PERCENT_DEFAULT))
+        self._destination_aliases = self._parse_destination_aliases(config.get("destination_aliases"))
+        self._hidden_lines = self._parse_hidden_lines(config.get("hidden_lines"))
         self._config_sig = self._config_signature(config)
 
         self._station_name = self.stop_name_override or "Haltestelle"
@@ -244,7 +319,29 @@ class DresdenDeparturesPlugin(BasePlugin):
         self._font_header = self._load_bdf(fonts_dir / "6x13B.bdf", 13)
 
     @staticmethod
+    def _parse_destination_aliases(raw: Any) -> Dict[str, str]:
+        if not isinstance(raw, dict):
+            return {}
+        aliases: Dict[str, str] = {}
+        for key, value in raw.items():
+            src = str(key).strip()
+            dst = str(value).strip()
+            if src and dst:
+                aliases[src] = dst
+        return aliases
+
+    @staticmethod
+    def _parse_hidden_lines(raw: Any) -> set[str]:
+        if not isinstance(raw, list):
+            return set()
+        return {str(line).strip() for line in raw if str(line).strip()}
+
+    @staticmethod
     def _config_signature(config: Dict[str, Any]) -> str:
+        aliases = config.get("destination_aliases") or {}
+        aliases_sig = json.dumps(aliases, sort_keys=True, ensure_ascii=False) if isinstance(aliases, dict) else ""
+        hidden = config.get("hidden_lines") or []
+        hidden_sig = json.dumps(hidden, sort_keys=True) if isinstance(hidden, list) else ""
         return "|".join([
             str(config.get("stop_id", "")).strip(),
             str(config.get("stop_name", "")).strip(),
@@ -254,9 +351,28 @@ class DresdenDeparturesPlugin(BasePlugin):
             str(config.get("sidebar_percent", _SIDEBAR_PERCENT_DEFAULT)),
             str(config.get("max_departures", 6)),
             str(config.get("show_station_header", True)),
+            aliases_sig,
+            hidden_sig,
         ])
 
+    def _reload_config(self) -> None:
+        """Pick up edits to config.json / config_secrets.json without a full restart."""
+        pm = self.plugin_manager
+        if pm is None:
+            return
+        cm = getattr(pm, "config_manager", None)
+        if cm is None:
+            return
+        try:
+            merged = cm.load_config()
+            section = merged.get(self.plugin_id)
+            if isinstance(section, dict):
+                self.config = section
+        except Exception as exc:
+            self.logger.debug("Config reload skipped: %s", exc)
+
     def _sync_config(self) -> None:
+        self._reload_config()
         self.stop_query = str(self.config.get("stop_id", "")).strip()
         self.stop_name_override = str(self.config.get("stop_name", "")).strip()
         self.tram_only = bool(self.config.get("tram_only", True))
@@ -266,6 +382,8 @@ class DresdenDeparturesPlugin(BasePlugin):
         self._config_latitude = float(self.config.get("latitude", 51.0504))
         self._config_longitude = float(self.config.get("longitude", 13.7373))
         self.sidebar_percent = float(self.config.get("sidebar_percent", _SIDEBAR_PERCENT_DEFAULT))
+        self._destination_aliases = self._parse_destination_aliases(self.config.get("destination_aliases"))
+        self._hidden_lines = self._parse_hidden_lines(self.config.get("hidden_lines"))
         sig = self._config_signature(self.config)
         if sig != self._config_sig:
             self._config_sig = sig
@@ -291,7 +409,7 @@ class DresdenDeparturesPlugin(BasePlugin):
             return
 
         refresh = max(5, int(self.config.get("update_interval", 15)))
-        cache_key = f"{self.plugin_id}_dep_{self.stop_query}"
+        cache_key = f"{self.plugin_id}_dep_{self.stop_query}_v2"
         cached = self.cache_manager.get(cache_key, max_age=refresh)
         if cached:
             self._station_name = self.stop_name_override or cached.get("station_name", self._station_name)
@@ -348,11 +466,12 @@ class DresdenDeparturesPlugin(BasePlugin):
 
     def display(self, force_clear: bool = False) -> None:
         """Draw the departure board; reuse cached frame when nothing changed."""
+        self._sync_config()
         now = datetime.now(self.timezone)
         forecast_slots = self._hourly_forecast_slots(self._weather.get("hourly") or {}, now)
         weather_sig = f"{self._weather.get('temp')}|{forecast_slots}"
         render_key = (
-            f"{now:%Y%m%d%H%M%S}|{self._departure_sig()}|{weather_sig}|"
+            f"{now:%Y%m%d%H%M%S}|{self._departure_sig(now)}|{weather_sig}|"
             f"{self._station_name}|{self.stop_query}|{self.show_station_header}"
         )
         if not force_clear and render_key == self._last_render_key and self._cached_image is not None:
@@ -366,7 +485,7 @@ class DresdenDeparturesPlugin(BasePlugin):
         img = Image.new("RGB", (width, height), COLOR_BLACK)
         draw = ImageDraw.Draw(img)
         visible_rows = self._visible_departure_count(height)
-        self._draw_left_panel(draw, left_w, height, visible_rows)
+        self._draw_left_panel(draw, left_w, height, visible_rows, now)
         draw.line([(divider_x, 0), (divider_x, height - 1)], fill=COLOR_ORANGE, width=1)
         self._draw_right_panel(draw, divider_x + 1, right_w, height, now, forecast_slots)
 
@@ -375,8 +494,42 @@ class DresdenDeparturesPlugin(BasePlugin):
         self.display_manager.image = img
         self.display_manager.update_display()
 
-    def _departure_sig(self) -> str:
-        return "|".join(f"{d['line']}:{d['minutes']}" for d in self._departures[: self.max_departures])
+    def _departure_sig(self, now: datetime) -> str:
+        return "|".join(
+            f"{d['line']}:{self._minutes_until(d, now)}"
+            for d in self._visible_departures(now)
+        )
+
+    def _visible_departures(self, now: datetime) -> List[Dict[str, Any]]:
+        """Apply hidden-line filter and row cap for display."""
+        visible: List[Dict[str, Any]] = []
+        for dep in self._departures:
+            if dep.get("line", "").strip() in self._hidden_lines:
+                continue
+            visible.append(dep)
+            if len(visible) >= self.max_departures:
+                break
+        return visible
+
+    def _minutes_until(self, dep: Dict[str, Any], now: datetime) -> int:
+        """Live countdown from stored departure time (updates every display tick).
+
+        Floor minutes so the count never overshoots — tram tends to feel on time
+        or a little early vs the number shown.
+        """
+        departs_at = dep.get("departs_at")
+        if departs_at:
+            try:
+                when = datetime.fromisoformat(str(departs_at))
+                if when.tzinfo is None:
+                    when = when.replace(tzinfo=self.timezone)
+                else:
+                    when = when.astimezone(self.timezone)
+                seconds = max(0, int((when - now).total_seconds()))
+                return seconds // 60
+            except (TypeError, ValueError):
+                pass
+        return max(0, int(dep.get("minutes", 0)))
 
     def _display_station_name(self) -> str:
         if self.stop_name_override:
@@ -386,7 +539,14 @@ class DresdenDeparturesPlugin(BasePlugin):
     def _station_max_width(self, left_w: int) -> int:
         return max(8, left_w - STATION_X - STATION_DIVIDER_GAP)
 
-    def _draw_left_panel(self, draw: ImageDraw.ImageDraw, left_w: int, height: int, visible_rows: int) -> None:
+    def _draw_left_panel(
+        self,
+        draw: ImageDraw.ImageDraw,
+        left_w: int,
+        height: int,
+        visible_rows: int,
+        now: datetime,
+    ) -> None:
         row_y = self._first_row_y()
         if self.show_station_header:
             header = self._display_station_name()
@@ -402,12 +562,15 @@ class DresdenDeparturesPlugin(BasePlugin):
             )
 
         shown = 0
-        for dep in self._departures:
+        for dep in self._visible_departures(now):
             if shown >= visible_rows or row_y + ROW_HEIGHT > height:
                 break
             self._font_body.draw(draw, dep["line"][:3], 2, row_y, COLOR_ORANGE)
-            direction = self._normalize_direction(dep["direction"])
-            mins = str(dep["minutes"])
+            direction = self._display_direction(
+                dep["direction"],
+                dep.get("route_stops_ahead"),
+            )
+            mins = str(self._minutes_until(dep, now))
             max_dest_w = self._dest_name_max_width(left_w)
             self._font_body.draw(
                 draw,
@@ -444,12 +607,19 @@ class DresdenDeparturesPlugin(BasePlugin):
         inner_w = panel_w - pad * 2
         cx = x0 + pad
 
-        self._draw_date_line(draw, cx, inner_w, lay["date_y"], now, lay["date_gap"])
+        self._draw_date_line(
+            draw, cx, inner_w, lay["date_y"], now,
+            lay["date_gap"], lay.get("date_month_gap", 0),
+        )
 
         time_str = now.strftime("%H:%M:%S")
         self._draw_centered_spaced_bdf(
             draw, cx, inner_w, lay["time_y"], time_str,
-            self._font_header, COLOR_ORANGE, lay.get("time_tracking", 0),
+            self._font_header, COLOR_ORANGE,
+            lay.get("time_tracking", 0),
+            lay.get("time_digit_tracking", 0),
+            small_colon=True,
+            colon_tracking=lay.get("time_colon_tracking", 0),
         )
 
         icon = self._code_to_icon(int(self._weather.get("weather_code") or 0))
@@ -475,21 +645,22 @@ class DresdenDeparturesPlugin(BasePlugin):
         y: int,
         now: datetime,
         gap_px: int,
+        month_gap_px: int = 0,
     ) -> None:
-        """Draw ``Mi`` + gap + ``3.`` + ``Jun`` centered as one block."""
+        """Draw ``Mi`` + gap + ``3.`` + gap + ``Jun`` centered as one block."""
         font = self._font_body
         day_name = DAY_NAMES_DE[now.weekday()]
         day_num = f"{now.day}."
         month = MONTH_NAMES_DE[now.month - 1]
         total_w = (
             font.text_width(day_name) + gap_px
-            + font.text_width(day_num) + font.text_width(month)
+            + font.text_width(day_num) + month_gap_px + font.text_width(month)
         )
         start_x = x0 + max(0, round((width - total_w) / 2))
         font.draw(draw, day_name, start_x, y, COLOR_ORANGE)
         x = start_x + font.text_width(day_name) + gap_px
         font.draw(draw, day_num, x, y, COLOR_ORANGE)
-        font.draw(draw, month, x + font.text_width(day_num), y, COLOR_ORANGE)
+        font.draw(draw, month, x + font.text_width(day_num) + month_gap_px, y, COLOR_ORANGE)
 
     def _draw_centered_spaced_bdf(
         self,
@@ -501,9 +672,34 @@ class DresdenDeparturesPlugin(BasePlugin):
         font: BdfFont,
         color: Tuple[int, int, int],
         tracking: int = 0,
+        digit_tracking: int = 0,
+        small_colon: bool = False,
+        colon_tracking: int = 0,
     ) -> None:
-        text_w = font.text_width(text, tracking)
-        font.draw(draw, text, x0 + max(0, (width - text_w) // 2), y, color, tracking)
+        text_w = font.text_width(
+            text,
+            tracking=tracking,
+            digit_tracking=digit_tracking,
+            small_colon=small_colon,
+            colon_tracking=colon_tracking,
+        )
+        font.draw(
+            draw, text, x0 + max(0, (width - text_w) // 2), y, color,
+            tracking=tracking,
+            digit_tracking=digit_tracking,
+            small_colon=small_colon,
+            colon_tracking=colon_tracking,
+        )
+
+    def _forecast_icon_xy(
+        self,
+        label_center: int,
+        icon_size: int,
+        icon: str,
+        base_y: int,
+    ) -> Tuple[int, int]:
+        x = label_center - icon_size // 2
+        return x, base_y
 
     def _format_forecast_temp(self, temp: Any) -> str:
         if temp is None:
@@ -539,10 +735,11 @@ class DresdenDeparturesPlugin(BasePlugin):
             self._font_body.draw(draw, label, label_x, lay["forecast_labels_y"], COLOR_ORANGE)
 
             label_center = label_x + label_w // 2
-            self._draw_weather_icon(
-                draw, label_center - icon_size // 2, lay["forecast_icons_y"], icon_size,
-                slot.get("icon", "cloud"),
+            icon = str(slot.get("icon", "cloud"))
+            icon_x, icon_y = self._forecast_icon_xy(
+                label_center, icon_size, icon, lay["forecast_icons_y"],
             )
+            self._draw_weather_icon(draw, icon_x, icon_y, icon_size, icon)
             temp_str = self._format_forecast_temp(slot.get("temp"))
             temp_w = self._font_body.text_width(temp_str)
             temp_offset = lay.get("forecast_temp_offset_x", 0)
@@ -576,38 +773,68 @@ class DresdenDeparturesPlugin(BasePlugin):
     def _icon_sun(self, draw: ImageDraw.ImageDraw, x: int, y: int, s: int) -> None:
         cx, cy = x + s // 2, y + s // 2
         r = max(2, s // 4)
-        ray = max(3, s // 3)
+        ray_end = max(r + 2, (s - 1) // 2)
         for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
             draw.line(
-                [(cx + dx * r, cy + dy * r), (cx + dx * ray, cy + dy * ray)],
+                [(cx + dx * (r + 1), cy + dy * (r + 1)), (cx + dx * ray_end, cy + dy * ray_end)],
                 fill=COLOR_ORANGE,
                 width=1,
             )
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=COLOR_ORANGE)
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=COLOR_ORANGE)
 
     def _icon_partly_cloudy(self, draw: ImageDraw.ImageDraw, x: int, y: int, s: int) -> None:
-        """Sun peeking from behind cloud (WMO code 2)."""
+        """Partly cloudy — forecast slots reuse the main-panel cloud icon."""
+        if s <= 9:
+            self._icon_cloud(draw, x, y, s)
+            return
         cx, cy = x + max(2, s // 4), y + s // 3
         r = max(2, s // 4)
-        ray = max(2, s // 4)
-        for dx, dy in ((-1, -1), (-1, 0), (0, -1)):
-            draw.line(
-                [(cx + dx * r, cy + dy * r), (cx + dx * ray, cy + dy * ray)],
-                fill=COLOR_ORANGE,
-                width=1,
-            )
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=COLOR_ORANGE)
-        self._icon_cloud(draw, x + s // 4, y + s // 3, max(4, s * 3 // 4))
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=COLOR_ORANGE)
+        draw.line([(cx, cy), (cx - r, cy - r - 1)], fill=COLOR_ORANGE, width=1)
+        draw.line([(cx, cy), (cx - r - 1, cy)], fill=COLOR_ORANGE, width=1)
+        draw.ellipse([x + s // 3, y + s // 3, x + s * 3 // 4, y + s * 2 // 3], outline=COLOR_ORANGE)
+        draw.ellipse([x + s // 2, y + s // 4, x + s - 1, y + s * 2 // 3], outline=COLOR_ORANGE)
 
     def _icon_cloud(self, draw: ImageDraw.ImageDraw, x: int, y: int, s: int) -> None:
-        """Overcast cloud — flat base with two humps (reads clearly at 8px)."""
-        base = y + s - 2
-        left = x + 1
-        right = x + s - 2
-        draw.line([(left, base), (right, base)], fill=COLOR_ORANGE, width=1)
-        mid = (left + right) // 2
-        draw.ellipse([left, base - s // 2, mid + 1, base + 1], outline=COLOR_ORANGE)
-        draw.ellipse([mid - 1, base - s * 2 // 3, right, base + 1], outline=COLOR_ORANGE)
+        """Two overlapping circle outlines — centered in forecast slots, classic layout at 12px+."""
+        if s <= 9:
+            cx, cy = x + s // 2, y + s // 2
+            r = max(2, s // 4)
+            draw.ellipse([cx - r - 1, cy - 1, cx, cy + r], outline=COLOR_ORANGE)
+            draw.ellipse([cx - 1, cy - r, cx + r + 1, cy + r], outline=COLOR_ORANGE)
+            return
+        draw.ellipse([x + s // 8, y + s // 3, x + s // 2, y + s * 2 // 3], outline=COLOR_ORANGE)
+        draw.ellipse([x + s // 3, y + s // 5, x + s * 7 // 8, y + s * 2 // 3], outline=COLOR_ORANGE)
+
+    def _plot_icon_pixels(
+        self,
+        draw: ImageDraw.ImageDraw,
+        x: int,
+        y: int,
+        s: int,
+        w: int,
+        h: int,
+        pixels: Tuple[Tuple[int, int], ...],
+    ) -> None:
+        """Draw a fixed pixel sprite centered inside an s×s box."""
+        ox = x + max(0, (s - w) // 2)
+        oy = y + max(0, (s - h) // 2)
+        for px, py in pixels:
+            draw.point((ox + px, oy + py), fill=COLOR_ORANGE)
+
+    def _icon_rain_small(self, draw: ImageDraw.ImageDraw, x: int, y: int, s: int, drops: int = 2) -> None:
+        """Rain — cloud sprite + vertical drop dots (no diagonal streaks at 8px)."""
+        self._plot_icon_pixels(draw, x, y, s, 5, 4, (
+            (1, 0), (2, 0), (3, 0),
+            (0, 1), (1, 1), (2, 1), (3, 1), (4, 1),
+            (1, 2), (2, 2), (3, 2),
+            (1, 3), (4, 3),
+        ) if drops <= 2 else (
+            (1, 0), (2, 0), (3, 0),
+            (0, 1), (1, 1), (2, 1), (3, 1), (4, 1),
+            (1, 2), (2, 2), (3, 2),
+            (0, 3), (2, 3), (4, 3),
+        ))
 
     def _draw_rain_streaks(
         self,
@@ -628,20 +855,37 @@ class DresdenDeparturesPlugin(BasePlugin):
 
     def _icon_drizzle(self, draw: ImageDraw.ImageDraw, x: int, y: int, s: int) -> None:
         """Drizzle (51–55): cloud + two short streaks."""
+        if s <= 9:
+            self._icon_rain_small(draw, x, y, s, drops=2)
+            return
         self._icon_cloud(draw, x, y, s)
         self._draw_rain_streaks(draw, x, y, s, count=2, streak_len=max(1, s // 5))
 
     def _icon_rain_light(self, draw: ImageDraw.ImageDraw, x: int, y: int, s: int) -> None:
         """Light rain (61, 63, 80, 81): cloud + two streaks."""
+        if s <= 9:
+            self._icon_rain_small(draw, x, y, s, drops=2)
+            return
         self._icon_cloud(draw, x, y, s)
         self._draw_rain_streaks(draw, x, y, s, count=2, streak_len=max(2, s // 3))
 
     def _icon_rain_heavy(self, draw: ImageDraw.ImageDraw, x: int, y: int, s: int) -> None:
         """Heavy rain (65, 82): cloud + four streaks."""
+        if s <= 9:
+            self._icon_rain_small(draw, x, y, s, drops=4)
+            return
         self._icon_cloud(draw, x, y, s)
         self._draw_rain_streaks(draw, x, y, s, count=4, streak_len=max(2, s // 3))
 
     def _icon_snow(self, draw: ImageDraw.ImageDraw, x: int, y: int, s: int) -> None:
+        if s <= 9:
+            self._plot_icon_pixels(draw, x, y, s, 5, 4, (
+                (1, 0), (2, 0), (3, 0),
+                (0, 1), (1, 1), (2, 1), (3, 1), (4, 1),
+                (1, 2), (2, 2), (3, 2),
+                (1, 3), (2, 3), (3, 3),
+            ))
+            return
         self._icon_cloud(draw, x, y, s)
         cx = x + s // 2
         base = y + s - 2
@@ -718,9 +962,52 @@ class DresdenDeparturesPlugin(BasePlugin):
             raise RuntimeError(f"Could not resolve stop ID for: {query}")
         return stop_id, name, lat, lon
 
+    @staticmethod
+    def _normalize_stop_name(name: str) -> str:
+        text = name.strip()
+        text = re.sub(r"^Dresden\s+", "", text, flags=re.IGNORECASE)
+        return text
+
+    def _fetch_trip_stops_ahead(
+        self,
+        trip_id: str,
+        trip_time: Any,
+        stop_id: str,
+    ) -> List[str]:
+        """Stops from the current position onward (VVO dm/trip), for route-based nicknames."""
+        if not trip_id or not trip_time or not stop_id:
+            return []
+        try:
+            data = self._post_json(
+                f"{VVO_BASE_URL}/dm/trip",
+                {
+                    "format": "json",
+                    "tripid": trip_id,
+                    "time": trip_time,
+                    "stopid": stop_id,
+                },
+            )
+            if data.get("Status", {}).get("Code") != "Ok":
+                return []
+            stops = data.get("Stops") or []
+            current_idx = next(
+                (idx for idx, stop in enumerate(stops) if stop.get("Position") == "Current"),
+                None,
+            )
+            if current_idx is None:
+                return []
+            return [
+                self._normalize_stop_name(str(stop.get("Name", "")))
+                for stop in stops[current_idx:]
+                if stop.get("Name")
+            ]
+        except Exception as exc:
+            self.logger.debug("Trip lookup failed for %s: %s", trip_id, exc)
+            return []
+
     def _fetch_departures(self) -> Tuple[str, List[Dict[str, Any]], Optional[float], Optional[float]]:
         stop_id, _name, stop_lat, stop_lon = self._lookup_stop(self.stop_query)
-        fetch_limit = self.max_departures + 8
+        fetch_limit = self.max_departures + 8 + len(self._hidden_lines) * 4
         body = {
             "format": "json",
             "stopid": stop_id,
@@ -739,14 +1026,25 @@ class DresdenDeparturesPlugin(BasePlugin):
         for dep in data.get("Departures") or []:
             if self.tram_only and dep.get("Mot") != "Tram":
                 continue
+            line = str(dep.get("LineName", "?")).strip()
+            if line in self._hidden_lines:
+                continue
             when = self._parse_vvo_time(dep.get("RealTime") or dep.get("ScheduledTime"))
             if when is None:
                 continue
             when_local = when.astimezone(self.timezone)
+            route_stops: List[str] = []
+            if self._destination_aliases:
+                route_stops = self._fetch_trip_stops_ahead(
+                    str(dep.get("Id", "")),
+                    dep.get("RealTime") or dep.get("ScheduledTime"),
+                    stop_id,
+                )
             results.append({
-                "line": str(dep.get("LineName", "?")),
+                "line": line,
                 "direction": str(dep.get("Direction", "")),
-                "minutes": max(0, int(round((when_local - now).total_seconds() / 60))),
+                "departs_at": when_local.isoformat(),
+                "route_stops_ahead": route_stops,
             })
             if len(results) >= self.max_departures:
                 break
@@ -887,6 +1185,11 @@ class DresdenDeparturesPlugin(BasePlugin):
         return left_w - DEST_NAME_X - mins_col_w - MINS_RIGHT_PAD
 
     @staticmethod
+    def _format_direction_display(text: str) -> str:
+        """Render VVO's ``->`` as a single narrow arrow on the matrix."""
+        return text.replace("->", DIRECTION_ARROW)
+
+    @staticmethod
     def _normalize_direction(direction: str) -> str:
         """Tighten VVO direction strings for the narrow LED column."""
         text = direction.strip()
@@ -896,6 +1199,79 @@ class DresdenDeparturesPlugin(BasePlugin):
         # VVO short-turn labels: "Löbtau->Li.12" → "Löbtau->12"
         text = re.sub(r"->Li\.(\d+)\s*$", r"->\1", text, flags=re.IGNORECASE)
         return text
+
+    def _direction_short_turn_suffix(self, text: str) -> Optional[str]:
+        """Short-turn tail after ``->`` (e.g. EV); omit plain endhaltestellen names."""
+        if "->" not in text:
+            return None
+        _, _, tail = text.partition("->")
+        tail = tail.strip()
+        return tail or None
+
+    def _match_route_alias(self, route_stops_ahead: List[str]) -> Optional[str]:
+        """Return nickname when a configured stop lies ahead on this trip."""
+        for src in sorted(self._destination_aliases, key=len, reverse=True):
+            dst = self._destination_aliases[src]
+            if not src:
+                continue
+            src_l = src.lower()
+            for stop in route_stops_ahead:
+                stop_l = stop.lower()
+                if stop_l == src_l or stop_l.startswith(src_l) or src_l in stop_l:
+                    return dst
+        return None
+
+    def _apply_direction_alias(self, text: str) -> str:
+        """Fallback: match alias keys against the VVO Direction / endhaltestelle label."""
+        for src in sorted(self._destination_aliases, key=len, reverse=True):
+            dst = self._destination_aliases[src]
+            if not src:
+                continue
+
+            if text == src or text.lower() == src.lower():
+                return dst
+
+            if text.lower().startswith(src.lower()):
+                rest = text[len(src):]
+                if not rest or rest[0] in "->,- ":
+                    return dst + rest
+
+            if "->" in text:
+                head, _, tail = text.partition("->")
+                if head.strip().lower() == src.lower():
+                    return dst + ("->" + tail if tail else "")
+
+            pattern = re.compile(r"(?<!\w)" + re.escape(src) + r"(?!\w)", re.IGNORECASE)
+            if pattern.search(text):
+                return pattern.sub(dst, text, count=1)
+
+        return text
+
+    def _display_direction(
+        self,
+        direction: str,
+        route_stops_ahead: Optional[List[str]] = None,
+    ) -> str:
+        """Apply nicknames from stops ahead on the route, then fall back to Direction text."""
+        text = self._normalize_direction(direction)
+        if not self._destination_aliases:
+            return self._format_direction_display(text)
+
+        nickname: Optional[str] = None
+        if route_stops_ahead:
+            nickname = self._match_route_alias(route_stops_ahead)
+        if nickname:
+            suffix = self._direction_short_turn_suffix(text)
+            if suffix:
+                return self._format_direction_display(nickname + "->" + suffix)
+            return nickname
+
+        return self._format_direction_display(self._apply_direction_alias(text))
+
+    def on_config_change(self, new_config: Dict[str, Any]) -> None:
+        """Apply runtime config updates (e.g. after editing config_secrets.json)."""
+        self.config = new_config
+        self._sync_config()
 
     def _truncate(self, text: str, max_px: int, font: BdfFont, **font_kw: Any) -> str:
         if font.text_width(text, **font_kw) <= max_px:
