@@ -73,7 +73,7 @@ SIDEBAR_LAYOUT = {
     "date_y": 1,
     "date_gap": 3,           # pixels between weekday ("Mi") and "3."
     "time_y": 9,
-    "time_tracking": 2,      # extra px between clock chars (wider look, still bold)
+    "time_tracking": 0,      # HH:MM:SS must fit ~54px sidebar inner width
     "weather_icon_y": 23,
     "weather_temp_y": 25,
     "weather_icon_size": 12,
@@ -109,6 +109,7 @@ SNOW_CODES = {71, 73, 75, 77, 85, 86}
 ICE_CODES = {56, 57, 66, 67}
 FOG_CODES = {45, 48}
 PARTLY_CLOUDY_CODES = {2}
+OVERCAST_CODES = {3}
 CLEAR_CODES = {0, 1}
 STORM_CODES = {95, 96, 99}
 
@@ -351,7 +352,7 @@ class DresdenDeparturesPlugin(BasePlugin):
         forecast_slots = self._hourly_forecast_slots(self._weather.get("hourly") or {}, now)
         weather_sig = f"{self._weather.get('temp')}|{forecast_slots}"
         render_key = (
-            f"{now:%Y%m%d%H%M}|{self._departure_sig()}|{weather_sig}|"
+            f"{now:%Y%m%d%H%M%S}|{self._departure_sig()}|{weather_sig}|"
             f"{self._station_name}|{self.stop_query}|{self.show_station_header}"
         )
         if not force_clear and render_key == self._last_render_key and self._cached_image is not None:
@@ -445,7 +446,7 @@ class DresdenDeparturesPlugin(BasePlugin):
 
         self._draw_date_line(draw, cx, inner_w, lay["date_y"], now, lay["date_gap"])
 
-        time_str = now.strftime("%H:%M")
+        time_str = now.strftime("%H:%M:%S")
         self._draw_centered_spaced_bdf(
             draw, cx, inner_w, lay["time_y"], time_str,
             self._font_header, COLOR_ORANGE, lay.get("time_tracking", 0),
@@ -575,24 +576,38 @@ class DresdenDeparturesPlugin(BasePlugin):
     def _icon_sun(self, draw: ImageDraw.ImageDraw, x: int, y: int, s: int) -> None:
         cx, cy = x + s // 2, y + s // 2
         r = max(2, s // 4)
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=COLOR_ORANGE)
         ray = max(3, s // 3)
-        for dx, dy in ((0, -ray), (0, ray), (-ray, 0), (ray, 0)):
-            draw.line([(cx, cy), (cx + dx, cy + dy)], fill=COLOR_ORANGE, width=1)
+        for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            draw.line(
+                [(cx + dx * r, cy + dy * r), (cx + dx * ray, cy + dy * ray)],
+                fill=COLOR_ORANGE,
+                width=1,
+            )
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=COLOR_ORANGE)
 
     def _icon_partly_cloudy(self, draw: ImageDraw.ImageDraw, x: int, y: int, s: int) -> None:
         """Sun peeking from behind cloud (WMO code 2)."""
         cx, cy = x + max(2, s // 4), y + s // 3
         r = max(2, s // 4)
-        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=COLOR_ORANGE)
-        draw.line([(cx, cy), (cx - r, cy - r - 1)], fill=COLOR_ORANGE, width=1)
-        draw.line([(cx, cy), (cx - r - 1, cy)], fill=COLOR_ORANGE, width=1)
-        draw.ellipse([x + s // 3, y + s // 3, x + s * 3 // 4, y + s * 2 // 3], outline=COLOR_ORANGE)
-        draw.ellipse([x + s // 2, y + s // 4, x + s - 1, y + s * 2 // 3], outline=COLOR_ORANGE)
+        ray = max(2, s // 4)
+        for dx, dy in ((-1, -1), (-1, 0), (0, -1)):
+            draw.line(
+                [(cx + dx * r, cy + dy * r), (cx + dx * ray, cy + dy * ray)],
+                fill=COLOR_ORANGE,
+                width=1,
+            )
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=COLOR_ORANGE)
+        self._icon_cloud(draw, x + s // 4, y + s // 3, max(4, s * 3 // 4))
 
     def _icon_cloud(self, draw: ImageDraw.ImageDraw, x: int, y: int, s: int) -> None:
-        draw.ellipse([x + s // 8, y + s // 3, x + s // 2, y + s * 2 // 3], outline=COLOR_ORANGE)
-        draw.ellipse([x + s // 3, y + s // 5, x + s * 7 // 8, y + s * 2 // 3], outline=COLOR_ORANGE)
+        """Overcast cloud — flat base with two humps (reads clearly at 8px)."""
+        base = y + s - 2
+        left = x + 1
+        right = x + s - 2
+        draw.line([(left, base), (right, base)], fill=COLOR_ORANGE, width=1)
+        mid = (left + right) // 2
+        draw.ellipse([left, base - s // 2, mid + 1, base + 1], outline=COLOR_ORANGE)
+        draw.ellipse([mid - 1, base - s * 2 // 3, right, base + 1], outline=COLOR_ORANGE)
 
     def _draw_rain_streaks(
         self,
@@ -833,6 +848,8 @@ class DresdenDeparturesPlugin(BasePlugin):
             return "fog"
         if code in PARTLY_CLOUDY_CODES:
             return "partly_cloudy"
+        if code in OVERCAST_CODES:
+            return "cloud"
         if code in CLEAR_CODES:
             return "sun"
         return "cloud"
