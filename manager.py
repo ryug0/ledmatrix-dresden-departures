@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from threading import Lock
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 from zoneinfo import ZoneInfo
@@ -121,6 +124,9 @@ FORECAST_ANCHOR_HOURS = (6, 13, 20)
 FORECAST_SLOT_COUNT = 3
 FORECAST_COL_GUTTER = 3
 WEATHER_CACHE_VERSION = 3
+CONFIG_RELOAD_INTERVAL_S = 30
+VVO_TRIP_TIMEOUT_S = 5
+VVO_TRIP_WORKERS = 4
 
 
 def _gk4_to_wgs(gk_lat: int, gk_lng: int) -> Optional[Tuple[float, float]]:
@@ -312,6 +318,10 @@ class DresdenDeparturesPlugin(BasePlugin):
         self._weather: Dict[str, Any] = {}
         self._last_render_key: Optional[str] = None
         self._cached_image: Optional[Image.Image] = None
+        self._vvo_stop_id: Optional[str] = None
+        self._vvo_stop_query: Optional[str] = None
+        self._config_reload_at: float = 0.0
+        self._update_lock = Lock()
 
         fonts_dir = _ledmatrix_fonts_dir(plugin_manager)
         self._font_body = self._load_bdf(fonts_dir / "5x7.bdf", 8)
@@ -356,7 +366,11 @@ class DresdenDeparturesPlugin(BasePlugin):
         ])
 
     def _reload_config(self) -> None:
-        """Pick up edits to config.json / config_secrets.json without a full restart."""
+        """Pick up config edits without reading disk on every display frame."""
+        now = time.monotonic()
+        if now - self._config_reload_at < CONFIG_RELOAD_INTERVAL_S:
+            return
+        self._config_reload_at = now
         pm = self.plugin_manager
         if pm is None:
             return
@@ -373,7 +387,11 @@ class DresdenDeparturesPlugin(BasePlugin):
 
     def _sync_config(self) -> None:
         self._reload_config()
-        self.stop_query = str(self.config.get("stop_id", "")).strip()
+        new_stop = str(self.config.get("stop_id", "")).strip()
+        if new_stop != self.stop_query:
+            self._vvo_stop_id = None
+            self._vvo_stop_query = None
+        self.stop_query = new_stop
         self.stop_name_override = str(self.config.get("stop_name", "")).strip()
         self.tram_only = bool(self.config.get("tram_only", True))
         self.max_departures = int(self.config.get("max_departures", 6))
@@ -403,6 +421,14 @@ class DresdenDeparturesPlugin(BasePlugin):
 
     def update(self) -> None:
         """Refresh departure and weather data from VVO / Open-Meteo."""
+        if not self._update_lock.acquire(blocking=False):
+            return
+        try:
+            self._update_impl()
+        finally:
+            self._update_lock.release()
+
+    def _update_impl(self) -> None:
         self._sync_config()
         if not self.stop_query:
             self.logger.warning("stop_id not configured")
@@ -410,7 +436,11 @@ class DresdenDeparturesPlugin(BasePlugin):
 
         refresh = max(5, int(self.config.get("update_interval", 15)))
         cache_key = f"{self.plugin_id}_dep_{self.stop_query}_v2"
-        cached = self.cache_manager.get(cache_key, max_age=refresh)
+        now = datetime.now(self.timezone)
+        force_fetch = self._departures_are_stale(now)
+        cached = None if force_fetch else self.cache_manager.get(cache_key, max_age=refresh)
+        if force_fetch and self._departures:
+            self.logger.info("Departures stale (all due); forcing VVO refresh")
         if cached:
             self._station_name = self.stop_name_override or cached.get("station_name", self._station_name)
             self._departures = cached.get("departures", [])
@@ -499,6 +529,12 @@ class DresdenDeparturesPlugin(BasePlugin):
             f"{d['line']}:{self._minutes_until(d, now)}"
             for d in self._visible_departures(now)
         )
+
+    def _departures_are_stale(self, now: datetime) -> bool:
+        """True when every cached departure is due (UI would show 0 for all rows)."""
+        if not self._departures:
+            return False
+        return all(self._minutes_until(dep, now) <= 0 for dep in self._departures)
 
     def _visible_departures(self, now: datetime) -> List[Dict[str, Any]]:
         """Apply hidden-line filter and row cap for display."""
@@ -986,6 +1022,7 @@ class DresdenDeparturesPlugin(BasePlugin):
                     "time": trip_time,
                     "stopid": stop_id,
                 },
+                timeout=VVO_TRIP_TIMEOUT_S,
             )
             if data.get("Status", {}).get("Code") != "Ok":
                 return []
@@ -1005,8 +1042,55 @@ class DresdenDeparturesPlugin(BasePlugin):
             self.logger.debug("Trip lookup failed for %s: %s", trip_id, exc)
             return []
 
+    def _resolve_vvo_stop(self) -> Tuple[str, Optional[float], Optional[float]]:
+        """Cache VVO stop ID so refresh cycles do not call pointfinder every time."""
+        query = self.stop_query
+        if self._vvo_stop_id and self._vvo_stop_query == query:
+            return self._vvo_stop_id, self._stop_latitude, self._stop_longitude
+        stop_id, _name, stop_lat, stop_lon = self._lookup_stop(query)
+        if not stop_id:
+            raise RuntimeError(f"Could not resolve stop ID for: {query}")
+        self._vvo_stop_id = stop_id
+        self._vvo_stop_query = query
+        self._stop_latitude = stop_lat
+        self._stop_longitude = stop_lon
+        return stop_id, stop_lat, stop_lon
+
+    def _attach_route_stops(self, results: List[Dict[str, Any]], raw_deps: List[Dict[str, Any]], stop_id: str) -> None:
+        if not self._destination_aliases or not results:
+            return
+        by_trip: Dict[str, Dict[str, Any]] = {}
+        for dep in raw_deps:
+            tid = str(dep.get("Id", ""))
+            if tid:
+                by_trip[tid] = dep
+
+        def trip_for(row: Dict[str, Any]) -> Tuple[str, List[str]]:
+            trip_id = str(row.get("_trip_id", ""))
+            dep = by_trip.get(trip_id, {})
+            stops = self._fetch_trip_stops_ahead(
+                trip_id,
+                dep.get("RealTime") or dep.get("ScheduledTime"),
+                stop_id,
+            )
+            return trip_id, stops
+
+        with ThreadPoolExecutor(max_workers=VVO_TRIP_WORKERS) as pool:
+            futures = [pool.submit(trip_for, row) for row in results]
+            stops_by_trip: Dict[str, List[str]] = {}
+            try:
+                for fut in as_completed(futures, timeout=VVO_TRIP_TIMEOUT_S * 2):
+                    trip_id, stops = fut.result()
+                    stops_by_trip[trip_id] = stops
+            except Exception as exc:
+                self.logger.warning("Route lookup partial failure: %s", exc)
+
+        for row in results:
+            trip_id = str(row.pop("_trip_id", ""))
+            row["route_stops_ahead"] = stops_by_trip.get(trip_id, [])
+
     def _fetch_departures(self) -> Tuple[str, List[Dict[str, Any]], Optional[float], Optional[float]]:
-        stop_id, _name, stop_lat, stop_lon = self._lookup_stop(self.stop_query)
+        stop_id, stop_lat, stop_lon = self._resolve_vvo_stop()
         fetch_limit = self.max_departures + 8 + len(self._hidden_lines) * 4
         body = {
             "format": "json",
@@ -1033,22 +1117,17 @@ class DresdenDeparturesPlugin(BasePlugin):
             if when is None:
                 continue
             when_local = when.astimezone(self.timezone)
-            route_stops: List[str] = []
-            if self._destination_aliases:
-                route_stops = self._fetch_trip_stops_ahead(
-                    str(dep.get("Id", "")),
-                    dep.get("RealTime") or dep.get("ScheduledTime"),
-                    stop_id,
-                )
             results.append({
                 "line": line,
                 "direction": str(dep.get("Direction", "")),
                 "departs_at": when_local.isoformat(),
-                "route_stops_ahead": route_stops,
+                "route_stops_ahead": [],
+                "_trip_id": str(dep.get("Id", "")),
             })
             if len(results) >= self.max_departures:
                 break
 
+        self._attach_route_stops(results, list(data.get("Departures") or []), stop_id)
         return station_name, results, stop_lat, stop_lon
 
     # --- Open-Meteo API ---

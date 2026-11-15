@@ -1,0 +1,6 @@
+[Unit]
+Description=Scheduled reboot (maintenance)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/shutdown -r now
